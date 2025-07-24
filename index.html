@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ตรวจจับท่าโอเค แบบ Angle Based</title>
+<style>
+  body { margin: 0; background: #111; color: #eee; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+  video { width: 320px; height: 240px; border: 2px solid #eee; }
+  #message { margin-top: 10px; font-size: 1.3em; text-align: center; }
+  #container { position: relative; width: 320px; height: 240px; }
+  canvas { position: absolute; left: 0; top: 0; }
+</style>
+</head>
+<body>
+
+<div id="container">
+  <video id="video" autoplay playsinline></video>
+  <canvas id="canvas" width="320" height="240"></canvas>
+</div>
+<div id="message">ขอสิทธิ์ใช้กล้อง...</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
+<script>
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const message = document.getElementById('message');
+
+  // ฟังก์ชันหามุมระหว่าง 3 จุด (deg)
+  function angleBetweenPoints(a, b, c) {
+    // a,b,c เป็น object {x,y,z}
+    // มุมที่ b ระหว่าง a และ c
+    function vector(p1, p2) {
+      return { x: p2.x - p1.x, y: p2.y - p1.y, z: p2.z - p1.z };
+    }
+    function dot(v1, v2) {
+      return v1.x*v2.x + v1.y*v2.y + v1.z*v2.z;
+    }
+    function length(v) {
+      return Math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+    }
+
+    const v1 = vector(b, a);
+    const v2 = vector(b, c);
+    const dotProd = dot(v1, v2);
+    const lenProd = length(v1)*length(v2);
+    if (lenProd === 0) return 0;
+    let angleRad = Math.acos(dotProd / lenProd);
+    return angleRad * (180 / Math.PI); // แปลงเป็นองศา
+  }
+
+  // ฟังก์ชันทดสอบท่า โอเค (ตรวจมุมหลักของนิ้วโป้งกับนิ้วชี้)
+  function checkOkPose(landmarks) {
+    if (!landmarks) return 0;
+
+    // มุมเป้าหมาย (องศา) ของข้อนิ้วแต่ละจุด (ประมาณจากท่าโอเค)
+    const targetAngles = {
+      thumb_ip: 45,   // มุมข้อไอพี (ปลายนิ้วโป้ง) (landmark 3-4-2)
+      index_dip: 45,  // มุมข้อดีไอพี (ปลายนิ้วชี้) (landmark 7-8-6)
+      index_pip: 20,  // มุมข้อพีไอพี (ข้อชั้นกลางนิ้วชี้) (landmark 6-7-5)
+    };
+
+    // คำนวณมุมจริง
+    let thumb_ip_angle = angleBetweenPoints(landmarks[3], landmarks[4], landmarks[2]);
+    let index_dip_angle = angleBetweenPoints(landmarks[7], landmarks[8], landmarks[6]);
+    let index_pip_angle = angleBetweenPoints(landmarks[6], landmarks[7], landmarks[5]);
+
+    // คำนวณความต่างมุม
+    function score(angle, target) {
+      let diff = Math.abs(angle - target);
+      // ถ้าต่างเกิน 60 องศา ให้คะแนน 0
+      if(diff > 60) return 0;
+      // คิดคะแนนแบบ linear
+      return Math.max(0, 100 - (diff/60)*100);
+    }
+
+    let scores = [
+      score(thumb_ip_angle, targetAngles.thumb_ip),
+      score(index_dip_angle, targetAngles.index_dip),
+      score(index_pip_angle, targetAngles.index_pip)
+    ];
+
+    let avgScore = scores.reduce((a,b)=>a+b,0)/scores.length;
+    return avgScore;
+  }
+
+  function onResults(results) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+      for (const landmarks of results.multiHandLandmarks) {
+        window.drawConnectors(ctx, landmarks, window.HANDS_CONNECTIONS, { color: '#00FF00', lineWidth: 2 });
+        window.drawLandmarks(ctx, landmarks, { color: '#FF0000', lineWidth: 1 });
+
+        const confidence = checkOkPose(landmarks);
+
+        if (confidence > 70) {
+          message.textContent = `ท่าทำถูก: โอเค (${confidence.toFixed(1)}%)`;
+        } else {
+          message.textContent = `ยังไม่ถูกต้อง (${confidence.toFixed(1)}%)`;
+        }
+      }
+    } else {
+      message.textContent = 'ยังไม่พบมือ...';
+    }
+  }
+
+  const hands = new window.Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.5
+  });
+
+  hands.onResults(onResults);
+
+  const camera = new window.Camera(video, {
+    onFrame: async () => {
+      await hands.send({ image: video });
+    },
+    width: 320,
+    height: 240
+  });
+
+  camera.start().then(() => {
+    message.textContent = "กำลังตรวจจับท่าทาง...";
+  }).catch(e => {
+    message.textContent = "ไม่สามารถเข้าถึงกล้องได้: " + e.message;
+  });
+</script>
+
+</body>
+</html>
